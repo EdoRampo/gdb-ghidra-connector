@@ -1,0 +1,12 @@
+# Ignore all log files and directories
+log/
+*_logs/
+.venv/
+.vscode/
+.claude/
+.agents/
+.history/
+
+# Ignore all demo scripts
+*_demo.sh
+
