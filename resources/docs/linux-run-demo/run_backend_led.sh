@@ -2,7 +2,7 @@
 
 # default config
 MODE=qemu
-OPENOCD_PATH=/mnt/d/PROGRAM/Hardware/xpack-openocd-0.12.0-7/openocd/scripts
+OPENOCD_PATH=</path/to/xpack-openocd-xx.xx.xx-x/openocd/scripts>
 
 # parse command line arguments
 while getopts "b:p:h" opt; do
