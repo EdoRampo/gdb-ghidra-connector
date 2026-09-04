@@ -37,10 +37,12 @@
 #   # 连 target，同时接入 Ghidra Trace RMI（用 venv 提供 psutil/protobuf）
 #   ./gdb_ghidra_connect.sh -a arm -p 1234 -f ./firmware.elf \
 #       -g /opt/ghidra_11.3 -G 127.0.0.1:18932 -V ~/.venvs/ghidra-gdb
+#       -k hardware -R "monitor system_reset"
 #
 #   # 连 OpenOCD (extended-remote 更适合真实硬件场景)
 #   ./gdb_ghidra_connect.sh -a arm -p 3333 -T extended-remote \
 #       -f ./firmware.elf -g /opt/ghidra_11.3 -G 127.0.0.1:18932
+#       -k hardware -R "monitor reset halt"
 # ============================================================
 set -euo pipefail
 
@@ -49,13 +51,16 @@ TARGET_HOST="127.0.0.1"
 TARGET_PORT=1234
 TARGET_TYPE="remote"        # remote | extended-remote
 FIRMWARE=""                 # 符号文件 (elf)，用于 file 命令 + 断点符号解析
-GDB_BIN="gdb-multiarch"
+GDB_BIN="${GDB_BIN:-gdb-multiarch}"
 BREAK_AT=""                 # 例如 *0x08000000，留空则不自动下断点
+BREAKPOINT_KIND="auto"      # auto | software | hardware；裸机 flash 推荐 auto/hardware
 GHIDRA_HOME=""               # -g，用于拼接 PYTHONPATH（未 pip 安装 ghidragdb 时需要）
 GHIDRA_TRACE_ADDR=""         # -G host:port，Ghidra Connections 窗口给出的 Trace RMI 地址
 FORCE_GHIDRA=0               # -F：即使依赖预检失败，也仍然把 ghidra 段写进 gdbinit
 VENV_PATH=""                 # -V：venv 目录，把其 site-packages 拼进 PYTHONPATH（装 psutil/protobuf 用）
 DIAGNOSE_NET=0                # -D：只做一次性网络探测并退出，注意会消耗 Ghidra 一次性 Accept 名额
+RESET_COMMAND=""             # -R：target-reset 执行的 GDB 命令，例如“monitor reset halt”
+RESET_ON_START=0              # -r：连接后立即复位一次，再设置启动断点
 LOG_DIR="./log/fw_debug_logs"
 TS="$(date +%Y%m%d_%H%M%S)"
 
@@ -65,7 +70,7 @@ ok()   { echo -e "${color_ok}[gdb] $(date '+%H:%M:%S')${rst} $*"; }
 warn() { echo -e "${color_w}[gdb] $(date '+%H:%M:%S')${rst} $*"; }
 err()  { echo -e "${color_e}[gdb] $(date '+%H:%M:%S')${rst} $*" >&2; }
 
-while getopts "a:H:p:T:f:b:g:G:L:V:FDh" opt; do
+while getopts "a:H:p:T:f:b:k:g:G:L:V:R:rFDh" opt; do
     case "$opt" in
         a) ARCH="$OPTARG" ;;
         H) TARGET_HOST="$OPTARG" ;;
@@ -73,15 +78,20 @@ while getopts "a:H:p:T:f:b:g:G:L:V:FDh" opt; do
         T) TARGET_TYPE="$OPTARG" ;;
         f) FIRMWARE="$OPTARG" ;;
         b) BREAK_AT="$OPTARG" ;;
+        k) BREAKPOINT_KIND="$OPTARG" ;;
         g) GHIDRA_HOME="$OPTARG" ;;
         G) GHIDRA_TRACE_ADDR="$OPTARG" ;;
         L) LOG_DIR="$OPTARG" ;;
         V) VENV_PATH="$OPTARG" ;;
+        R) RESET_COMMAND="$OPTARG" ;;
+        r) RESET_ON_START=1 ;;
         F) FORCE_GHIDRA=1 ;;
         D) DIAGNOSE_NET=1 ;;
         h)
             echo "用法: $0 -a arm|mips -p 端口 [-H host] [-T remote|extended-remote]"
-            echo "        [-f 固件elf] [-b 断点地址] [-g GHIDRA_HOME] [-G ghidra_host:port]"
+            echo "        [-f 固件elf] [-b 断点地址] [-k auto|software|hardware]"
+            echo "        [-R \"monitor reset halt\"] [-r 连接后立即复位]"
+            echo "        [-g GHIDRA_HOME] [-G ghidra_host:port]"
             echo "        [-V venv目录] [-F 跳过依赖预检强行写入]"
             echo "        [-D 仅网络诊断并退出，会消耗Ghidra一次性Accept名额] [-L 日志目录]"
             exit 0 ;;
@@ -119,6 +129,36 @@ case "$ARCH" in
     mips) GDB_ARCH="mips" ;;
     *) err "未知架构: $ARCH（支持 arm/mips）"; exit 1 ;;
 esac
+
+case "$TARGET_TYPE" in
+    remote|extended-remote) ;;
+    *) err "未知目标类型: $TARGET_TYPE（支持 remote/extended-remote）"; exit 1 ;;
+esac
+
+case "$BREAKPOINT_KIND" in
+    auto|software|hardware) ;;
+    *) err "未知断点类型: $BREAKPOINT_KIND（支持 auto/software/hardware）"; exit 1 ;;
+esac
+
+FIRMWARE_IS_BIN=0
+if [[ -n "$FIRMWARE" && "${FIRMWARE,,}" == *.bin ]]; then
+    FIRMWARE_IS_BIN=1
+    warn ".bin 不包含 ELF 符号，本次不会执行 GDB file 命令；请用同一固件的 .elf/.axf 作为 -f"
+fi
+
+# 不同后端使用的复位命令不同。这里不自动在启动时复位，只生成统一的
+# target-reset 命令；用户可通过 -R 覆盖，并用 -r 让脚本启动时调用它。
+if [[ -z "$RESET_COMMAND" ]]; then
+    case "$TARGET_PORT" in
+        3333) RESET_COMMAND="monitor reset halt" ;;  # OpenOCD 默认 GDB 端口
+        1234) RESET_COMMAND="monitor system_reset" ;; # QEMU 默认 GDB 端口
+        *)     RESET_COMMAND="monitor reset halt" ;;
+    esac
+fi
+if [[ "$RESET_COMMAND" == *$'\n'* || "$RESET_COMMAND" == *$'\r'* ]]; then
+    err "-R 不能包含换行"
+    exit 1
+fi
 
 log "目标: ${TARGET_TYPE} ${TARGET_HOST}:${TARGET_PORT}  架构=${GDB_ARCH}"
 
@@ -319,16 +359,40 @@ fi
     echo "set logging file ${GDB_LOG}"
     echo "set logging enabled on"
     echo ""
-    if [[ -n "$FIRMWARE" ]]; then
+    if [[ -n "$FIRMWARE" && "$FIRMWARE_IS_BIN" -eq 0 ]]; then
         echo "file ${FIRMWARE}"
     fi
     echo "target ${TARGET_TYPE} ${TARGET_HOST}:${TARGET_PORT}"
     echo "set architecture ${GDB_ARCH}"
+    # 裸机程序通常位于只读 flash。auto-hw 允许 GDB 在软件断点无法写入
+    # 目标内存时自动改用硬件断点；也可用 -k hardware/software 强制选择。
+    if [[ "$BREAKPOINT_KIND" == "auto" ]]; then
+        echo "set breakpoint auto-hw on"
+    fi
     echo "echo \\n[gdbinit] 已连接 ${TARGET_TYPE} ${TARGET_HOST}:${TARGET_PORT}, 架构=${GDB_ARCH}\\n"
     echo ""
+
+    # 为 QEMU/OpenOCD 统一提供一个 GDB 侧的复位入口。GDB 本身没有跨
+    # remote stub 通用的 reset 命令，必须通过 monitor 转发给后端。
+    echo "define target-reset"
+    echo "  ${RESET_COMMAND}"
+    echo "end"
+    echo "document target-reset"
+    echo "  复位目标并保持在后端指定的停止状态。QEMU 可用 monitor system_reset，OpenOCD 可用 monitor reset halt。"
+    echo "end"
+    echo "echo [gdbinit] 已定义 target-reset: ${RESET_COMMAND}\\n"
+    if [[ "$RESET_ON_START" -eq 1 ]]; then
+        echo "target-reset"
+        echo "echo [gdbinit] 已执行启动复位\\n"
+    fi
+
     if [[ -n "$BREAK_AT" ]]; then
-        echo "break ${BREAK_AT}"
-        echo "echo [gdbinit] 已在 ${BREAK_AT} 设置断点\\n"
+        case "$BREAKPOINT_KIND" in
+            hardware) BREAK_CMD="hbreak" ;;
+            software|auto) BREAK_CMD="break" ;;
+        esac
+        echo "${BREAK_CMD} ${BREAK_AT}"
+        echo "echo [gdbinit] 已用 ${BREAK_CMD} 在 ${BREAK_AT} 设置断点\\n"
     fi
     echo ""
     if [[ -n "$GHIDRA_TRACE_ADDR" ]]; then
