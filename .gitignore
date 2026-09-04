@@ -1,5 +1,6 @@
 # Ignore all log files and directories
 log/
+temp/
 *_logs/
 .venv/
 .vscode/
