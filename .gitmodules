@@ -1,10 +1,7 @@
 [submodule "backends/FIDO"]
 	path = backends/FIDO
 	url = git@github.com:IoTS-P/FIDO.git
+	
 [submodule "backends/halucinator"]
 	path = backends/halucinator
 	url = git@github.com:embedded-sec/halucinator.git
-
-[submodule "backends/DICE"]
-	path = backends/DICE
-	url = git@github.com:RiS3-Lab/DICE-DMA-Emulation.git
