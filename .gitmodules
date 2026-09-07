@@ -1,7 +1,9 @@
 [submodule "backends/FIDO"]
 	path = backends/FIDO
 	url = git@github.com:IoTS-P/FIDO.git
+	ignore = dirty
 	
 [submodule "backends/halucinator"]
 	path = backends/halucinator
 	url = git@github.com:embedded-sec/halucinator.git
+	ignore = dirty
