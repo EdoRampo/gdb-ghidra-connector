@@ -57,6 +57,7 @@ STEP2: 启动 Ghidra 前端：打开 Ghidra Debugger 的端口监听，配置网
 STEP3: 启动 gdb 连接后端以及 ghidra 前端
 ```bash
 cd /path/to/gdb-ghidra-connector
+# 如果pip未安装 ghidra debugger，请注意配置 Ghidra Path
 ./run_gdb_led.sh -m ghidra -p 1234 -g 18932
 ```
 STEP4: 回到 Ghidra Debugger 观察回显，开始调试  
